@@ -137,6 +137,72 @@ export async function setVolume(
   });
 }
 
+/**
+ * Push track metadata over the encrypted control channel as a DMAP `mlit` blob.
+ *
+ * There are two metadata paths on AirPlay 2 and only this one is open to us:
+ * Apple's now-playing screen rides the type-130 MediaRemote channel, whose keys
+ * derive from a pair-VERIFY shared secret, so it needs stored credentials from a
+ * PIN pairing. A transiently paired session cannot reach it. This DMAP push over
+ * SET_PARAMETER needs no credentials, and some receivers (Sonos) withhold audio
+ * entirely until they have had it.
+ *
+ * :param rtpTimestamp: the current RTP position — the blob is anchored to it,
+ *   and a receiver may reject a metadata request that arrives without one.
+ */
+export async function setMetadata(
+  rtsp: RtspConnection,
+  sessionUrl: string,
+  metadata: { title?: string; artist?: string; album?: string },
+  rtpTimestamp: number,
+): Promise<void> {
+  const field = (tag: string, value: string): Buffer => {
+    const payload = Buffer.from(value, 'utf8');
+    const head = Buffer.alloc(8);
+    head.write(tag, 0, 'latin1');
+    head.writeUInt32BE(payload.length, 4);
+    return Buffer.concat([head, payload]);
+  };
+
+  const body = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x01, 0x02]), // mikd: length 1, value 2
+    field('minm', metadata.title ?? ''),
+    field('asar', metadata.artist ?? ''),
+    field('asal', metadata.album ?? ''),
+    Buffer.from([0x00, 0x00, 0x00, 0x02, 0x00, 0x01]), // astn: track number 1
+  ]);
+  const mikd = Buffer.alloc(4);
+  mikd.write('mikd', 0, 'latin1');
+  const payload = Buffer.concat([mikd, body]);
+
+  const container = Buffer.alloc(8);
+  container.write('mlit', 0, 'latin1');
+  container.writeUInt32BE(payload.length, 4);
+
+  await rtsp.request('SET_PARAMETER', {
+    uri: sessionUrl,
+    contentType: 'application/x-dmap-tagged',
+    headers: { 'RTP-Info': `rtptime=${rtpTimestamp >>> 0}` },
+    body: Buffer.concat([container, payload]),
+  });
+}
+
+/** Push cover art on the same DMAP/SET_PARAMETER path as {@link setMetadata}. */
+export async function setArtwork(
+  rtsp: RtspConnection,
+  sessionUrl: string,
+  contentType: string,
+  data: Buffer,
+  rtpTimestamp: number,
+): Promise<void> {
+  await rtsp.request('SET_PARAMETER', {
+    uri: sessionUrl,
+    contentType,
+    headers: { 'RTP-Info': `rtptime=${rtpTimestamp >>> 0}` },
+    body: data,
+  });
+}
+
 export interface RealtimeSenderOptions {
   host: string;
   dataPort: number;
@@ -169,6 +235,10 @@ export class RealtimeSender {
   private syncTimer: NodeJS.Timeout | null = null;
   private readonly leadMs: number;
   public packetsSent = 0;
+  /** Current RTP position; metadata is anchored to it. */
+  public get rtpPosition(): number {
+    return this.rtpTimestamp >>> 0;
+  }
   /** Packets kept on the wire exactly as sent, so a resend is a byte copy —
    * re-encrypting would need the original nonce anyway. */
   private readonly rtxRing: (Buffer | null)[] = new Array(RTX_RING_SLOTS).fill(null);
@@ -249,9 +319,27 @@ export class RealtimeSender {
     return { data: data.socket, control: control.socket, dataPort: data.port, controlPort: control.port };
   }
 
-  /** Freeze the anchor line and start announcing it. */
-  public start(): void {
-    this.anchorWall0 = this.options.ptp.now();
+  /**
+   * Freeze the anchor line and start announcing it.
+   *
+   * :param startAtUnixMs: for a synchronised group, the wall-clock instant the
+   *   first sample must be AUDIBLE on every member. All members are handed the
+   *   same value, so they map the same sample to the same moment however far
+   *   ahead each one runs. Anchoring one lead early is what makes the line's
+   *   audible point land exactly on that instant. Omitted = start now, which is
+   *   the solo case.
+   *
+   * This works because our timeline is the host's realtime clock — the same
+   * base the caller's shared instant comes from — and because every member of
+   * the group is served by the one grandmaster this process runs.
+   */
+  public start(startAtUnixMs?: number): void {
+    const now = this.options.ptp.now();
+    if (startAtUnixMs !== undefined) {
+      this.anchorWall0 = BigInt(Math.round(startAtUnixMs)) * 1_000_000n - BigInt(this.leadMs) * 1_000_000n;
+    } else {
+      this.anchorWall0 = now;
+    }
     this.anchorPos0 = this.rtpTimestamp;
     this.anchored = true;
     this.sendSyncPacket(true);

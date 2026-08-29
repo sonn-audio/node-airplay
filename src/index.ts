@@ -23,7 +23,7 @@ export { TRANSIENT_PIN } from './srp.js';
 export { PtpEngine, type PtpEngineOptions } from './ptp.js';
 export { encodeAlacPacket, type AlacEncoderOptions } from './alac.js';
 export {
-  setupRealtimeStream, RealtimeSender, setVolume, volumeToDb,
+  setupRealtimeStream, RealtimeSender, setVolume, volumeToDb, setMetadata, setArtwork,
   FRAMES_PER_PACKET, AUDIO_FORMAT_ALAC_44100_16_2,
   type StreamSetupResult, type RealtimeSenderOptions,
 } from './stream.js';

@@ -27,12 +27,26 @@ status codes:
 - RECORD, stream SETUP (type 96 realtime, ALAC 44100/16/2)
 - ALAC encoding and the encrypted RTP stream, anchored on the PTP timeline
 
+- retransmits: the receiver asks for audio it lost and gets it back
+- track metadata and cover art, over the DMAP/SET_PARAMETER path
+- synchronised groups: members handed one shared instant anchor to it
+
 ## What does not exist yet
 
-Metadata and artwork (the MediaRemote channel), `FLUSH` for a clean seek or
-skip, retransmit handling, synchronised groups, 24-bit, the buffered (type 103)
-stream, and non-Apple receivers beyond what the protocol implies — this has been
-tested against one HomePod. There are no tests.
+**Apple's now-playing screen.** It rides the MediaRemote channel, whose keys
+derive from a pair-VERIFY secret, so it needs stored credentials from a PIN
+pairing; a transiently paired session cannot reach it. The DMAP metadata above
+is the path that is open without credentials.
+
+**`FLUSH` for seek and skip — deliberately.** The reference implementation
+avoids every flush verb on Apple receivers: dropping their queue produces an
+audible noise burst, so the queued audio is left to play out instead. That makes
+the send lead the bound on how much of the old track a skip still plays, which
+is why it is kept shallow. A non-Apple AirPlay 2 receiver should get a real
+FLUSH, per device.
+
+24-bit, the buffered (type 103) stream, and any receiver that is not the one
+HomePod this was measured against.
 
 ## Requirements
 
