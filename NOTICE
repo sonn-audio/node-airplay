@@ -1,0 +1,22 @@
+@sonn-audio/node-airplay
+Copyright 2026 Rudy Berends
+
+This product includes software ported from cliairplay, part of Music Assistant
+(https://github.com/music-assistant), Copyright 2024-2026 Music Assistant
+Contributors, licensed under the Apache License, Version 2.0.
+
+The AirPlay 2 protocol logic in this package — HAP pair-setup and its SRP-6a
+parameters, the binary-plist message shapes, the PTP grandmaster's message
+layouts and announce dataset, the realtime RTP framing and its encryption, and
+the anchor packet — is a TypeScript port of the Apache-2.0 licensed sources in
+that project's `src/` directory (ap2_hap.c, ap2_ptp.c, ap2_client.c, ap2_plist.c
+and ap2_bplist.cpp).
+
+Those files carry per-file `SPDX-License-Identifier: Apache-2.0` headers and are
+explicitly reusable under that licence on their own. The GPL parts of cliairplay
+— its `cliairplay.c` entry point and the libraop RAOP core it links — are NOT
+used here: this package contains no AirPlay 1 / RAOP code and links no native
+libraries.
+
+The ALAC frame layout was read from libraop's decoder (alac.c) to establish what
+receivers accept; no decoder code is included.
