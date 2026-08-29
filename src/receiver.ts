@@ -23,6 +23,7 @@ import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { createDecipheriv, randomBytes } from 'node:crypto';
 import { AlacDecoder, parseAlacFmtp, type AlacConfig } from './alacDecoder.js';
 import { ntpNow } from './ntpTiming.js';
+import { answerChallenge, decryptAesKey } from './appleKey.js';
 
 /** Events a session raises, mirroring what the native receiver reported. */
 export type ReceiverEvent =
@@ -61,12 +62,6 @@ export interface ReceiverOptions {
     encryptedKey: boolean;
     headers: string[];
   }) => void;
-  rsa?: {
-    /** Decrypt an `rsaaeskey` from the SDP into the 16-byte AES key. */
-    decryptAesKey(wrapped: Buffer): Buffer;
-    /** Sign an `Apple-Challenge` into the `Apple-Response` header value. */
-    answerChallenge(challenge: Buffer, localAddress: string, mac: Buffer): string;
-  };
 }
 
 /** What the caller needs to advertise the service over mDNS. */
@@ -140,8 +135,8 @@ export class AirPlayReceiver {
         sv: 'false',
         // `ek=1` and an `et` with a 1 in it are claims about encryption we can
         // only make when the caller supplied the key to back them up.
-        ek: this.options.rsa ? '1' : '0',
-        et: this.options.rsa ? '0,1' : '0',
+        ek: '1',
+        et: '0,1',
         md: '0,1,2',
         cn: '0,1',
         ch: '2',
@@ -282,8 +277,8 @@ export class AirPlayReceiver {
     // A sender may demand proof we hold the AirPort key before it will stream.
     const extra: Record<string, string> = {};
     const challenge = headers.get('apple-challenge');
-    if (challenge && this.options.rsa) {
-      extra['Apple-Response'] = this.options.rsa.answerChallenge(
+    if (challenge) {
+      extra['Apple-Response'] = answerChallenge(
         Buffer.from(challenge, 'base64'),
         socket.localAddress?.replace(/^::ffff:/, '') ?? '',
         this.mac,
@@ -349,7 +344,7 @@ export class AirPlayReceiver {
         session.alac = parseAlacFmtp(line.slice(line.indexOf(' ') + 1));
       } else if (line.startsWith('a=rsaaeskey:')) {
         const wrapped = Buffer.from(base64Pad(line.slice('a=rsaaeskey:'.length)), 'base64');
-        session.aesKey = this.options.rsa ? this.options.rsa.decryptAesKey(wrapped) : null;
+        session.aesKey = decryptAesKey(wrapped);
       } else if (line.startsWith('a=aesiv:')) {
         session.aesIv = Buffer.from(base64Pad(line.slice('a=aesiv:'.length)), 'base64');
       }

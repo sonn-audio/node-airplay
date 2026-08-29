@@ -67,3 +67,14 @@ when wrong.
 ## Licence
 
 Apache-2.0.
+
+## The AirPlay 1 RSA key
+
+`src/appleKey.ts` carries the AirPort Express private key. A sender wraps its
+AES audio key in the matching public key and the protocol has no way to
+negotiate a different one, so a receiver either holds this exact key or cannot
+read a single audio packet -- a receiver that advertises `et=0` is abandoned by
+an iPhone right after `OPTIONS`. Every third-party RAOP receiver ships it for
+that reason, shairport-sync and libraop among them, and it has been public for
+well over a decade. It is used only by the receiver; the sender side never
+touches it.
