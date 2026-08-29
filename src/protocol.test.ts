@@ -178,3 +178,46 @@ test('volume maps onto the AirPlay dB scale, with zero as mute', () => {
   strictEqual(volumeToDb(-20), -144, 'clamped below zero');
   strictEqual(volumeToDb(500), 0, 'clamped above full');
 });
+
+// --- ALAC decoder -----------------------------------------------------------
+
+test('the decoder reads back what the encoder wrote, sample for sample', async () => {
+  const { AlacDecoder, parseAlacFmtp } = await import('./alacDecoder.js');
+  const config = parseAlacFmtp('352 0 16 40 10 14 2 255 0 0 44100');
+  ok(config, 'the fmtp line parses');
+  strictEqual(config.framesPerPacket, 352);
+  strictEqual(config.bitDepth, 16);
+  strictEqual(config.channels, 2);
+  strictEqual(config.sampleRate, 44100);
+
+  const frames = 352;
+  const pcm = Buffer.alloc(frames * 4);
+  for (let i = 0; i < frames; i++) {
+    // Something with real structure, so a predictor bug would show as drift
+    // rather than as a single wrong sample.
+    pcm.writeInt16LE(Math.round(8000 * Math.sin((2 * Math.PI * i) / 32)), i * 4);
+    pcm.writeInt16LE(Math.round(-6000 * Math.sin((2 * Math.PI * i) / 41)), i * 4 + 2);
+  }
+
+  const decoded = new AlacDecoder(config).decode(
+    encodeAlacPacket(pcm, { framesPerPacket: frames, bitDepth: 16, channels: 2 }),
+  );
+  ok(decoded, 'the frame decodes');
+  deepStrictEqual(decoded, pcm);
+});
+
+test('a partial frame survives the round trip too', async () => {
+  const { AlacDecoder, parseAlacFmtp } = await import('./alacDecoder.js');
+  const config = parseAlacFmtp('352 0 16 40 10 14 2 255 0 0 44100');
+  ok(config);
+  const frames = 91;
+  const pcm = Buffer.alloc(frames * 4);
+  for (let i = 0; i < frames; i++) {
+    pcm.writeInt16LE(i * 37 - 1500, i * 4);
+    pcm.writeInt16LE(2000 - i * 11, i * 4 + 2);
+  }
+  const decoded = new AlacDecoder(config).decode(
+    encodeAlacPacket(pcm, { framesPerPacket: 352, bitDepth: 16, channels: 2 }),
+  );
+  deepStrictEqual(decoded, pcm);
+});

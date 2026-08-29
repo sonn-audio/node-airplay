@@ -22,6 +22,11 @@ export { RtspConnection } from './rtsp.js';
 export { TRANSIENT_PIN } from './srp.js';
 export { PtpEngine, type PtpEngineOptions } from './ptp.js';
 export { NtpTimingResponder, ntpNow, buildNtpSyncPacket } from './ntpTiming.js';
+export { AlacDecoder, parseAlacFmtp, type AlacConfig } from './alacDecoder.js';
+export {
+  AirPlayReceiver,
+  type ReceiverOptions, type ReceiverEvent, type ReceiverAdvertisement,
+} from './receiver.js';
 export {
   connectRaop, RaopStreamer, RAOP_FRAMES_PER_PACKET,
   type RaopConnectOptions, type RaopSession, type RaopStreamOptions,
