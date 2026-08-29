@@ -21,6 +21,7 @@ export { HapError, HapSession } from './hap.js';
 export { RtspConnection } from './rtsp.js';
 export { TRANSIENT_PIN } from './srp.js';
 export { PtpEngine, type PtpEngineOptions } from './ptp.js';
+export { NtpTimingResponder, ntpNow, buildNtpSyncPacket } from './ntpTiming.js';
 export { encodeAlacPacket, type AlacEncoderOptions } from './alac.js';
 export {
   setupRealtimeStream, RealtimeSender, setVolume, volumeToDb, setMetadata, setArtwork,
@@ -155,12 +156,17 @@ export class AirPlayConnection {
    * engine must be serving under {@link identity}'s clockId by the time the
    * receiver starts probing it.
    */
-  public async setupSession(name = 'sonn'): Promise<SessionSetupResult> {
+  public async setupSession(
+    name = 'sonn',
+    timing?: { timing: 'ptp' | 'ntp'; timingPort?: number },
+  ): Promise<SessionSetupResult> {
     const result = await setupSession(this.rtsp, this.sessionUrl, {
       identity: this.identity,
       localAddress: this.rtsp.localAddress(),
       name,
       timelineClockId: this.identity.clockId,
+      ...(timing ? { timing: timing.timing } : {}),
+      ...(timing?.timingPort !== undefined ? { timingPort: timing.timingPort } : {}),
     });
     // Both of these keep the session alive, and neither announces itself when
     // missing: the receiver just stops following the timeline after ~30 s.

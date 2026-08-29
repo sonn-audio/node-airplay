@@ -48,6 +48,14 @@ export function createIdentity(bytes: Buffer): SenderIdentity {
 
 export interface SessionSetupOptions {
   identity: SenderIdentity;
+  /**
+   * Which clock the session runs on. PTP is the normal lane; NTP is for
+   * receivers that do not actually serve PTP — see {@link NtpTimingResponder}.
+   * On NTP the SETUP carries our timing port instead of a peer list.
+   */
+  timing?: 'ptp' | 'ntp';
+  /** Our NTP responder's port; required when `timing` is `ntp`. */
+  timingPort?: number;
   /** Our address as the receiver must reach it — goes into the timing peer list. */
   localAddress: string;
   /** Name the receiver shows for this session. */
@@ -66,6 +74,11 @@ export interface SessionSetupResult {
   groupUuid: string;
   /** TCP port the receiver opens for session events; 0 when it reports none. */
   eventPort: number;
+  /**
+   * The receiver answered with a timing port of its own, which means it wants
+   * the NTP lane however loudly its TXT record advertises PTP.
+   */
+  wantsNtpTiming: boolean;
   /** The parsed SETUP reply, for callers that want the rest of it. */
   response: { [key: string]: PlistValue };
 }
@@ -98,17 +111,27 @@ export async function setupSession(
   const peerId = randomUUID().toUpperCase();
   const peer = timingPeer(peerId, options.timelineClockId, options.localAddress);
 
-  const body = buildBinaryPlist({
-    timingProtocol: 'PTP',
-    deviceID: options.identity.deviceId,
-    sessionUUID: sessionUuid,
-    name: options.name,
-    macAddress: options.identity.macAddress,
-    groupUUID: groupUuid,
-    groupContainsGroupLeader: false,
-    timingPeerInfo: peer,
-    timingPeerList: [peer],
-  });
+  // The two lanes send different dictionaries: PTP advertises the clock the
+  // receiver must follow, NTP advertises the port it must poll.
+  const body =
+    options.timing === 'ntp'
+      ? buildBinaryPlist({
+          deviceID: options.identity.deviceId,
+          sessionUUID: sessionUuid,
+          timingPort: options.timingPort ?? 0,
+          timingProtocol: 'NTP',
+        })
+      : buildBinaryPlist({
+          timingProtocol: 'PTP',
+          deviceID: options.identity.deviceId,
+          sessionUUID: sessionUuid,
+          name: options.name,
+          macAddress: options.identity.macAddress,
+          groupUUID: groupUuid,
+          groupContainsGroupLeader: false,
+          timingPeerInfo: peer,
+          timingPeerList: [peer],
+        });
 
   const response = await rtsp.request('SETUP', {
     uri: sessionUrl,
@@ -127,8 +150,12 @@ export async function setupSession(
     }
   }
   const eventPort = typeof parsed['eventPort'] === 'number' ? (parsed['eventPort'] as number) : 0;
+  // A receiver that answers a PTP SETUP with its own timingPort is telling us it
+  // expects the NTP model — the signature of a device that advertises
+  // SupportsPTP and then never probes our clock.
+  const wantsNtpTiming = typeof parsed['timingPort'] === 'number';
 
-  return { sessionUuid, groupUuid, eventPort, response: parsed };
+  return { sessionUuid, groupUuid, eventPort, wantsNtpTiming, response: parsed };
 }
 
 /**

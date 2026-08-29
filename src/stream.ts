@@ -15,6 +15,7 @@ import { parseBinaryPlist, type PlistValue } from './bplist.js';
 import { buildBinaryPlist } from './bplistWriter.js';
 import { encodeAlacPacket } from './alac.js';
 import type { PtpEngine } from './ptp.js';
+import { buildNtpSyncPacket } from './ntpTiming.js';
 import type { RtspConnection } from './rtsp.js';
 
 const PLIST_CONTENT_TYPE = 'application/x-apple-binary-plist';
@@ -210,6 +211,13 @@ export interface RealtimeSenderOptions {
   /** The `shk` the stream SETUP announced. */
   audioKey: Buffer;
   ptp: PtpEngine;
+  /**
+   * Timing lane. `ntp` swaps the anchor packet for the 20-byte NTP form and
+   * leaves the PTP engine out of the timeline; the receiver polls our responder
+   * instead. Apple receivers must stay on `ptp` — they render silence on an
+   * NTP-timed realtime stream.
+   */
+  timing?: 'ptp' | 'ntp';
   /**
    * How far ahead of the render point audio is handed over, in milliseconds:
    * the receiver plays a sample this long after we send it.
@@ -410,6 +418,16 @@ export class RealtimeSender {
    */
   private sendSyncPacket(first: boolean): void {
     if (!this.anchored) {
+      return;
+    }
+    if (this.options.timing === 'ntp') {
+      const leadFrames = Math.round((this.leadMs / 1000) * SAMPLE_RATE);
+      const packet = buildNtpSyncPacket(this.rtpTimestamp, leadFrames, first);
+      this.controlSocket.send(packet, this.options.controlPort, this.options.host, (err) => {
+        if (err) {
+          this.options.onLog?.(`ntp sync send failed: ${err.message}`);
+        }
+      });
       return;
     }
     const wall = this.options.ptp.now();

@@ -30,6 +30,9 @@ status codes:
 - retransmits: the receiver asks for audio it lost and gets it back
 - track metadata and cover art, over the DMAP/SET_PARAMETER path
 - synchronised groups: members handed one shared instant anchor to it
+- both timing lanes, chosen per device from what the receiver answers rather
+  than what it advertises: PTP for Apple receivers, NTP for the ones that
+  advertise `SupportsPTP` and then never probe the clock
 
 ## What does not exist yet
 
@@ -45,8 +48,8 @@ the send lead the bound on how much of the old track a skip still plays, which
 is why it is kept shallow. A non-Apple AirPlay 2 receiver should get a real
 FLUSH, per device.
 
-24-bit, the buffered (type 103) stream, and any receiver that is not the one
-HomePod this was measured against.
+24-bit, the buffered (type 103) stream, and any receiver beyond the two this was
+measured against: a HomePod (OS 27, PTP lane) and a BeoLab 50 (NTP lane).
 
 ## Requirements
 
