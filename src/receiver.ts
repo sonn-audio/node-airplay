@@ -34,7 +34,7 @@ export type ReceiverEvent =
   | { type: 'flush' }
   | { type: 'stop' }
   | { type: 'volume'; value: number }
-  | { type: 'metadata'; title?: string; artist?: string; album?: string }
+  | { type: 'metadata'; title?: string; artist?: string; album?: string; durationMs?: number }
   /** Where the sender says it is in the track. */
   | { type: 'progress'; elapsedMs: number; durationMs: number }
   | { type: 'artwork'; contentType: string; data: Buffer }
@@ -510,7 +510,7 @@ export class AirPlayReceiver {
     }
 
     if (contentType.startsWith('image/')) {
-      this.onEvent({ type: 'artwork', contentType, data: body });
+      this.onEvent({ type: 'artwork', contentType, data: trimImage(contentType, body) });
       return;
     }
 
@@ -597,8 +597,33 @@ function base64Pad(value: string): string {
  * length and a payload, nested — only the three fields a now-playing display
  * needs are read.
  */
-function parseDmap(body: Buffer): { title?: string; artist?: string; album?: string } {
-  const out: { title?: string; artist?: string; album?: string } = {};
+/**
+ * Cut a fixed-size artwork body down to the image it carries.
+ *
+ * iOS declares a Content-Length of exactly 180224 bytes for every cover and
+ * leaves whatever was in that slot after the image's own end marker -- around
+ * 78 KB of it. Decoders stop at the marker, so it renders either way, but
+ * passing the tail on means every consumer stores and serves it too, and a
+ * stricter one may refuse the file outright.
+ */
+function trimImage(contentType: string, body: Buffer): Buffer {
+  if (!contentType.startsWith('image/jpeg') || body.length < 4) {
+    return body;
+  }
+  if (body.readUInt16BE(0) !== 0xffd8) {
+    return body;
+  }
+  const end = body.lastIndexOf(Buffer.from([0xff, 0xd9]));
+  return end > 0 && end + 2 < body.length ? body.subarray(0, end + 2) : body;
+}
+
+function parseDmap(body: Buffer): {
+  title?: string;
+  artist?: string;
+  album?: string;
+  durationMs?: number;
+} {
+  const out: { title?: string; artist?: string; album?: string; durationMs?: number } = {};
   const walk = (buffer: Buffer): void => {
     let offset = 0;
     while (offset + 8 <= buffer.length) {
@@ -613,6 +638,15 @@ function parseDmap(body: Buffer): { title?: string; artist?: string; album?: str
         out.artist = value.toString('utf8');
       } else if (tag === 'asal') {
         out.album = value.toString('utf8');
+      } else if (tag === 'astm' && length === 4) {
+        // daap.songtime, in milliseconds. Worth having even though `progress`
+        // carries a length too: this one arrives with every track's metadata,
+        // where progress is sent sparsely -- so it is the only length a
+        // receiver can count on seeing for each track.
+        const ms = value.readUInt32BE(0);
+        if (ms > 0) {
+          out.durationMs = ms;
+        }
       }
       offset += 8 + length;
     }
