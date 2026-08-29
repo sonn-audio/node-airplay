@@ -22,6 +22,10 @@ export { RtspConnection } from './rtsp.js';
 export { TRANSIENT_PIN } from './srp.js';
 export { PtpEngine, type PtpEngineOptions } from './ptp.js';
 export { NtpTimingResponder, ntpNow, buildNtpSyncPacket } from './ntpTiming.js';
+export {
+  connectRaop, RaopStreamer, RAOP_FRAMES_PER_PACKET,
+  type RaopConnectOptions, type RaopSession, type RaopStreamOptions,
+} from './raop.js';
 export { encodeAlacPacket, type AlacEncoderOptions } from './alac.js';
 export {
   setupRealtimeStream, RealtimeSender, setVolume, volumeToDb, setMetadata, setArtwork,
