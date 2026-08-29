@@ -19,7 +19,11 @@ export class PlistInt64 {
   constructor(public readonly value: bigint) {}
 }
 
-export type PlistInput = PlistValue | PlistInt64;
+export type PlistInput =
+  | PlistValue
+  | PlistInt64
+  | PlistInput[]
+  | { [key: string]: PlistInput };
 
 /** One object in the table: its value plus the indices of the objects it refers to. */
 interface Entry {
@@ -55,7 +59,7 @@ function marker(type: number, count: number): Buffer {
   return Buffer.concat([Buffer.from([(type << 4) | 0x0f, 0x10 | power]), writeUInt(count, size)]);
 }
 
-function isDict(value: PlistInput): value is { [key: string]: PlistValue } {
+function isDict(value: PlistInput): value is { [key: string]: PlistInput } {
   return (
     value !== null &&
     typeof value === 'object' &&
@@ -84,11 +88,11 @@ export function buildBinaryPlist(root: PlistInput): Buffer {
     const entry: Entry = { value, refs: [] };
     entries.push(entry);
     if (Array.isArray(value)) {
-      entry.refs = value.map((item) => intern(item));
+      entry.refs = (value as PlistInput[]).map((item) => intern(item));
     } else if (isDict(value)) {
       const keys = Object.keys(value);
       const keyRefs = keys.map((key) => intern(key));
-      const valueRefs = keys.map((key) => intern(value[key] as PlistValue));
+      const valueRefs = keys.map((key) => intern(value[key] as PlistInput));
       entry.refs = [...keyRefs, ...valueRefs];
     }
     return index;

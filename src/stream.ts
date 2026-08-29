@@ -28,6 +28,18 @@ const TAG_SIZE = 16;
 /** The receiver's buffering window for a live RTP feed. */
 const LATENCY_MIN = 11_025;
 const LATENCY_MAX = 88_200;
+/**
+ * Retransmit history. Receivers report lost audio on the control port and wait
+ * for it to come back; left unanswered the request simply repeats and the
+ * receiver keeps a permanent hole in its stream. A request is only worth
+ * answering while the packet is still ahead of the receiver's play point, so
+ * the ring only has to outlast the send window — 512 packets is 4.1 s.
+ */
+const RTX_RING_SLOTS = 512;
+/** Control-port message types (marker bit set): request in, resend out. */
+const RTX_REQUEST_TYPE = 0x55;
+const RTX_RESEND_TYPE = 0xd6;
+
 /** Offsets shairport-sync's receiver math expects in the anchor packet. */
 const ANCHOR_FRAME_1_OFFSET = 11_035;
 const ANCHOR_FRAME_2_OFFSET = 77_175;
@@ -157,6 +169,13 @@ export class RealtimeSender {
   private syncTimer: NodeJS.Timeout | null = null;
   private readonly leadMs: number;
   public packetsSent = 0;
+  /** Packets kept on the wire exactly as sent, so a resend is a byte copy —
+   * re-encrypting would need the original nonce anyway. */
+  private readonly rtxRing: (Buffer | null)[] = new Array(RTX_RING_SLOTS).fill(null);
+  private readonly rtxSeq: number[] = new Array(RTX_RING_SLOTS).fill(-1);
+  public rtxRequested = 0;
+  public rtxAnswered = 0;
+  public rtxExpired = 0;
 
   constructor(
     private readonly options: RealtimeSenderOptions,
@@ -166,6 +185,50 @@ export class RealtimeSender {
     this.dataSocket = dataSocket;
     this.controlSocket = controlSocket;
     this.leadMs = options.leadMs ?? 2000;
+    this.controlSocket.on('message', (msg, rinfo) => this.onControl(msg, rinfo));
+  }
+
+  /**
+   * Answer a receiver's request for audio it lost.
+   *
+   * Request (type 0x55): [2:4] the request's own sequence, [4:6] the first
+   * missing RTP sequence, [6:8] how many. The reply wraps the original packet
+   * verbatim behind a 4-byte header echoing that request sequence, and goes
+   * back to where the request came from rather than the configured control
+   * address — the same endpoint for a well-behaved receiver, and it keeps
+   * working for one that asks from a different source port.
+   */
+  private onControl(msg: Buffer, rinfo: { address: string; port: number }): void {
+    if (msg.length < 8 || ((msg[1] as number) & 0x7f) !== RTX_REQUEST_TYPE) {
+      return;
+    }
+    const requestSeq = msg.readUInt16BE(2);
+    const first = msg.readUInt16BE(4);
+    let count = msg.readUInt16BE(6);
+    if (count === 0 || count > RTX_RING_SLOTS) {
+      count = count === 0 ? 1 : RTX_RING_SLOTS;
+    }
+    this.rtxRequested += count;
+
+    for (let i = 0; i < count; i++) {
+      const seq = (first + i) & 0xffff;
+      const slot = seq % RTX_RING_SLOTS;
+      const stored = this.rtxSeq[slot] === seq ? this.rtxRing[slot] : null;
+      if (!stored) {
+        this.rtxExpired++;
+        continue;
+      }
+      const header = Buffer.alloc(4);
+      header[0] = 0x80;
+      header[1] = RTX_RESEND_TYPE;
+      header.writeUInt16BE(requestSeq, 2);
+      this.controlSocket.send(Buffer.concat([header, stored]), rinfo.port, rinfo.address, (err) => {
+        if (err) {
+          this.options.onLog?.(`retransmit send failed: ${err.message}`);
+        }
+      });
+      this.rtxAnswered++;
+    }
   }
 
   /** Bind the two local UDP sockets the stream SETUP has to advertise. */
@@ -235,6 +298,11 @@ export class RealtimeSender {
     const ciphertext = Buffer.concat([cipher.update(encoded), cipher.final()]);
 
     const packet = Buffer.concat([header, ciphertext, cipher.getAuthTag(), nonce.subarray(4, 12)]);
+    // Keep the wire bytes: the receiver can ask for this packet back at any
+    // point inside its buffer window.
+    const slot = (this.sequence & 0xffff) % RTX_RING_SLOTS;
+    this.rtxRing[slot] = packet;
+    this.rtxSeq[slot] = this.sequence & 0xffff;
     this.dataSocket.send(packet, this.options.dataPort, this.options.host, (err) => {
       if (err) {
         this.options.onLog?.(`RTP send failed: ${err.message}`);

@@ -100,6 +100,10 @@ export function srpClientCompute(
   salt: Buffer,
   serverPublicKey: Buffer,
   secret: string,
+  /** Private value `a`; random when omitted. Injectable so the exchange can be
+   * checked against an independent implementation, which is the only way to
+   * catch a padding convention that is wrong but self-consistent. */
+  privateKey?: Buffer,
 ): SrpClientResult {
   const B = toBigInt(serverPublicKey);
   if (B % N === 0n) {
@@ -107,7 +111,7 @@ export function srpClientCompute(
   }
 
   // A = g^a mod N, with a 256-bit random private value.
-  const a = toBigInt(randomBytes(32));
+  const a = toBigInt(privateKey ?? randomBytes(32));
   const A = modPow(G, a, N);
   const aPub = toBuffer(A);
 

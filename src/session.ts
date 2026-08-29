@@ -14,7 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 import { parseBinaryPlist, type PlistValue } from './bplist.js';
-import { buildBinaryPlist, PlistInt64 } from './bplistWriter.js';
+import { buildBinaryPlist, PlistInt64, type PlistInput } from './bplistWriter.js';
 import type { RtspConnection } from './rtsp.js';
 
 const PLIST_CONTENT_TYPE = 'application/x-apple-binary-plist';
@@ -70,11 +70,11 @@ export interface SessionSetupResult {
   response: { [key: string]: PlistValue };
 }
 
-function timingPeer(peerId: string, clockId: bigint, address: string): { [key: string]: PlistValue } {
+function timingPeer(peerId: string, clockId: bigint, address: string): PlistInput {
   return {
     ID: peerId,
     DeviceType: 0,
-    ClockID: new PlistInt64(clockId) as unknown as PlistValue,
+    ClockID: new PlistInt64(clockId),
     SupportsClockPortMatchingOverride: false,
     Addresses: [address],
   };
