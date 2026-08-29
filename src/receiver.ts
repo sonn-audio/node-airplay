@@ -35,6 +35,8 @@ export type ReceiverEvent =
   | { type: 'stop' }
   | { type: 'volume'; value: number }
   | { type: 'metadata'; title?: string; artist?: string; album?: string }
+  /** Where the sender says it is in the track. */
+  | { type: 'progress'; elapsedMs: number; durationMs: number }
   | { type: 'artwork'; contentType: string; data: Buffer }
   | { type: 'pcm'; sampleRate: number; channels: number; data: Buffer };
 
@@ -322,7 +324,7 @@ export class AirPlayReceiver {
         return;
 
       case 'SET_PARAMETER':
-        this.handleSetParameter(headers, body);
+        this.handleSetParameter(session, headers, body);
         this.reply(socket, cseq, extra);
         return;
 
@@ -472,11 +474,32 @@ export class AirPlayReceiver {
   }
 
   /** Volume, track metadata and cover art all arrive on SET_PARAMETER. */
-  private handleSetParameter(headers: Map<string, string>, body: Buffer): void {
+  private handleSetParameter(
+    session: SessionState,
+    headers: Map<string, string>,
+    body: Buffer,
+  ): void {
     const contentType = headers.get('content-type') ?? '';
 
     if (contentType.startsWith('text/parameters')) {
-      const match = /volume:\s*(-?[\d.]+)/.exec(body.toString('utf8'));
+      const text = body.toString('utf8');
+      // `progress: <start>/<current>/<end>`, all three in RTP ticks at the
+      // stream's own sample rate. Converting here keeps the caller from having
+      // to know the unit, and the sender is the only party that knows where in
+      // the track it is -- nothing in the audio itself carries that.
+      const progress = /progress:\s*(\d+)\/(\d+)\/(\d+)/.exec(text);
+      if (progress) {
+        const rate = session.alac?.sampleRate ?? 44100;
+        const start = Number(progress[1]);
+        const current = Number(progress[2]);
+        const end = Number(progress[3]);
+        this.onEvent({
+          type: 'progress',
+          elapsedMs: Math.max(0, Math.round(((current - start) / rate) * 1000)),
+          durationMs: Math.max(0, Math.round(((end - start) / rate) * 1000)),
+        });
+      }
+      const match = /volume:\s*(-?[\d.]+)/.exec(text);
       if (match) {
         this.volume = Number(match[1]);
         // The wire scale is dB from -30 to 0, with -144 for mute.
