@@ -24,7 +24,7 @@ export { PtpEngine, type PtpEngineOptions } from './ptp.js';
 export { NtpTimingResponder, ntpNow, buildNtpSyncPacket } from './ntpTiming.js';
 export { AlacDecoder, parseAlacFmtp, type AlacConfig } from './alacDecoder.js';
 export {
-  AirPlayReceiver,
+  AirPlayReceiver, sendRemoteCommand,
   type ReceiverOptions, type ReceiverEvent, type ReceiverAdvertisement,
 } from './receiver.js';
 export {

@@ -18,7 +18,7 @@
  * already runs.
  */
 
-import { createServer, type Server, type Socket } from 'node:net';
+import { connect as connectTcp, createServer, type Server, type Socket } from 'node:net';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { createDecipheriv, randomBytes } from 'node:crypto';
 import { AlacDecoder, parseAlacFmtp, type AlacConfig } from './alacDecoder.js';
@@ -27,6 +27,8 @@ import { ntpNow } from './ntpTiming.js';
 /** Events a session raises, mirroring what the native receiver reported. */
 export type ReceiverEvent =
   | { type: 'stream'; port: number }
+  /** The sender named its remote-control service; resolve it to send commands back. */
+  | { type: 'remote'; dacpId: string; activeRemote: string }
   | { type: 'play' }
   | { type: 'pause' }
   | { type: 'flush' }
@@ -50,6 +52,13 @@ export interface ReceiverOptions {
    * them to accept encrypted senders; leave them out and the service advertises
    * cleartext only.
    */
+  /** Called for every request, so a caller can see how far a sender got. */
+  onRequest?: (info: {
+    method: string;
+    appleChallenge: boolean;
+    encryptedKey: boolean;
+    headers: string[];
+  }) => void;
   rsa?: {
     /** Decrypt an `rsaaeskey` from the SDP into the 16-byte AES key. */
     decryptAesKey(wrapped: Buffer): Buffer;
@@ -79,6 +88,14 @@ interface SessionState {
   senderTimingPort: number;
   senderControlPort: number;
   senderAddress: string;
+  /**
+   * The sender's remote-control identity, from its RTSP headers. `DACP-ID`
+   * names an `_dacp._tcp` service the sender publishes; `Active-Remote` is the
+   * token that service accepts. Together they are how a receiver sends play,
+   * pause and skip BACK to whatever is streaming to it.
+   */
+  dacpId: string | null;
+  activeRemote: string | null;
 }
 
 /**
@@ -128,7 +145,9 @@ export class AirPlayReceiver {
         ch: '2',
         ss: '16',
         sr: '44100',
-        vn: '65537',
+        // The RAOP protocol version. 65537 is the AirPlay 2 value and tells a
+        // sender it is looking at something it should talk to differently.
+        vn: '3',
         txtvers: '1',
         am: this.options.model ?? 'sonn',
       },
@@ -158,6 +177,8 @@ export class AirPlayReceiver {
       senderTimingPort: 0,
       senderControlPort: 0,
       senderAddress: socket.remoteAddress?.replace(/^::ffff:/, '') ?? '',
+      dacpId: null,
+      activeRemote: null,
     };
     this.sessions.set(socket, session);
 
@@ -209,6 +230,10 @@ export class AirPlayReceiver {
   ): void {
     const headers: Record<string, string> = {
       Server: 'AirTunes/105.1',
+      // Senders check this to know the receiver actually has an output; without
+      // it an iPhone retries OPTIONS a few times and gives up before it ever
+      // gets as far as ANNOUNCE.
+      'Audio-Jack-Status': 'connected; type=analog',
       CSeq: cseq,
       ...extra,
     };
@@ -233,6 +258,24 @@ export class AirPlayReceiver {
   ): void {
     const [method = ''] = requestLine.split(' ');
     const cseq = headers.get('cseq') ?? '0';
+    this.options.onRequest?.({
+      method,
+      appleChallenge: headers.has('apple-challenge'),
+      encryptedKey: body.toString('latin1').includes('rsaaeskey'),
+      headers: [...headers.keys()],
+    });
+
+    // Every request carries these; keep the latest so a remote command can be
+    // sent at any point in the session.
+    const dacpId = headers.get('dacp-id');
+    const activeRemote = headers.get('active-remote');
+    if (dacpId && dacpId !== session.dacpId) {
+      session.dacpId = dacpId;
+      session.activeRemote = activeRemote ?? session.activeRemote;
+      this.onEvent({ type: 'remote', dacpId, activeRemote: session.activeRemote ?? '' });
+    } else if (activeRemote) {
+      session.activeRemote = activeRemote;
+    }
 
     // A sender may demand proof we hold the AirPort key before it will stream.
     const extra: Record<string, string> = {};
@@ -460,6 +503,54 @@ export class AirPlayReceiver {
     session.audio = session.control = session.timing = null;
     session.decoder = null;
   }
+}
+
+/**
+ * Send a transport command back to the device that is streaming to us.
+ *
+ * The sender publishes an `_dacp._tcp` service named `iTunes_Ctrl_<DACP-ID>`;
+ * resolving that is the caller's job (this package carries no mDNS), and the
+ * address it finds goes in here. The request itself is a bare HTTP GET carrying
+ * the `Active-Remote` token as its only credential.
+ */
+export async function sendRemoteCommand(
+  host: string,
+  port: number,
+  activeRemote: string,
+  command: 'play' | 'pause' | 'playpause' | 'stop' | 'nextitem' | 'previtem' | 'mutetoggle',
+  timeoutMs = 3000,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = connectTcp({ host, port });
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(ok);
+      }
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once('connect', () => {
+      socket.write(
+        `GET /ctrl-int/1/${command} HTTP/1.0\r\n` +
+          `Active-Remote: ${activeRemote}\r\n` +
+          `Connection: close\r\n\r\n`,
+      );
+    });
+    socket.once('data', (chunk) => {
+      clearTimeout(timer);
+      finish(/^HTTP\/1\.[01] 2\d\d/.test(chunk.toString('latin1')));
+    });
+    socket.once('error', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    socket.once('close', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
 }
 
 async function bind(socket: UdpSocket): Promise<void> {
