@@ -26,6 +26,9 @@ import { ntpNow } from './ntpTiming.js';
 import { answerChallenge, decryptAesKey } from './appleKey.js';
 
 /** Events a session raises, mirroring what the native receiver reported. */
+/** Beyond this a gap is a blackout or a seek, not loss worth asking back for. */
+const MAX_RESEND_RUN = 128;
+
 export type ReceiverEvent =
   | { type: 'stream'; port: number }
   /** The sender named its remote-control service; resolve it to send commands back. */
@@ -103,6 +106,17 @@ export class AirPlayReceiver {
   private server: Server | null = null;
   private readonly sessions = new Map<Socket, SessionState>();
   private readonly mac: Buffer;
+  private lastSeq = -1;
+  private lastTs = -1;
+  private counters = {
+    received: 0,
+    missed: 0,
+    retransmitted: 0,
+    undecodable: 0,
+    resendsAsked: 0,
+    framesAnnounced: 0,
+    framesDecoded: 0,
+  };
   private volume = 0;
 
   constructor(
@@ -110,6 +124,25 @@ export class AirPlayReceiver {
     private readonly onEvent: (event: ReceiverEvent) => void,
   ) {
     this.mac = options.mac ?? randomBytes(6);
+  }
+
+  /**
+   * What the audio path has seen since the stream started.
+   *
+   * `missed` counts gaps in the sender's sequence numbers -- audio that never
+   * arrived -- and is the number that separates a network problem from a
+   * decoding one, which sound identical from the outside.
+   */
+  public get stats(): {
+    received: number;
+    missed: number;
+    retransmitted: number;
+    undecodable: number;
+    resendsAsked: number;
+    framesAnnounced: number;
+    framesDecoded: number;
+  } {
+    return { ...this.counters };
   }
 
   /** Start listening. Returns what the caller needs to advertise. */
@@ -396,6 +429,29 @@ export class AirPlayReceiver {
   }
 
   /**
+   * Ask the sender to send a run of packets again.
+   *
+   * Not a standard RTCP NACK: eight bytes, type 0x55, carrying the first
+   * missing sequence number and how many follow. Without this a receiver simply
+   * keeps whatever holes the network left, and on a link with any loss that is
+   * the difference between clean audio and a hiccup every few seconds.
+   */
+  private requestResend(session: SessionState, first: number, count: number): void {
+    // A silly range means a blackout or a seek, not loss worth chasing.
+    if (!session.control || !session.senderControlPort || count > MAX_RESEND_RUN) {
+      return;
+    }
+    const req = Buffer.alloc(8);
+    req[0] = 0x80;
+    req[1] = 0x55 | 0x80;
+    req.writeUInt16BE(1, 2);
+    req.writeUInt16BE(first, 4);
+    req.writeUInt16BE(count, 6);
+    this.counters.resendsAsked += count;
+    session.control.send(req, session.senderControlPort, session.senderAddress);
+  }
+
+  /**
    * The control port carries two different things and they must not be
    * confused: a retransmit reply (type 0xD6) wraps a real audio packet behind a
    * four-byte header, while a sync packet (0xD4) is the sender telling us where
@@ -408,7 +464,7 @@ export class AirPlayReceiver {
     }
     const type = (msg[1] as number) & 0x7f;
     if (type === 0x56) {
-      this.onAudio(session, msg.subarray(4));
+      this.onAudio(session, msg.subarray(4), true);
     }
     // 0x54 is the sync packet; the timeline it announces is not used yet.
   }
@@ -441,9 +497,35 @@ export class AirPlayReceiver {
    * left in the clear, which is what the format specifies and what a decoder
    * that assumes otherwise gets wrong.
    */
-  private onAudio(session: SessionState, packet: Buffer): void {
+  private onAudio(session: SessionState, packet: Buffer, retransmitted = false): void {
     if (packet.length <= 12 || !session.decoder || !session.alac) {
       return;
+    }
+    if (retransmitted) {
+      this.counters.retransmitted += 1;
+    } else {
+      const seq = packet.readUInt16BE(2);
+      if (this.lastSeq >= 0) {
+        // 16-bit wrap, and a retransmit arriving late reads as a jump backwards.
+        const delta = (seq - this.lastSeq) & 0xffff;
+        if (delta > 1 && delta < 0x8000) {
+          this.counters.missed += delta - 1;
+          this.requestResend(session, (this.lastSeq + 1) & 0xffff, delta - 1);
+        }
+      }
+      // What the sender says each packet is worth, which need not match what we
+      // decode out of it -- and that difference is exactly the kind that goes
+      // unnoticed, since neither a gap nor a decode failure shows up.
+      const ts = packet.readUInt32BE(4);
+      if (this.lastTs >= 0) {
+        const step = (ts - this.lastTs) >>> 0;
+        if (step > 0 && step < 0x8000) {
+          this.counters.framesAnnounced += step;
+        }
+      }
+      this.lastTs = ts;
+      this.lastSeq = seq;
+      this.counters.received += 1;
     }
     let payload = packet.subarray(12);
 
@@ -458,7 +540,11 @@ export class AirPlayReceiver {
     }
 
     const pcm = session.decoder.decode(payload);
+    if (!pcm) {
+      this.counters.undecodable += 1;
+    }
     if (pcm) {
+      this.counters.framesDecoded += pcm.length / (session.alac.channels * 2);
       this.onEvent({
         type: 'pcm',
         sampleRate: session.alac.sampleRate,
