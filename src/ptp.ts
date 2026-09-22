@@ -101,6 +101,10 @@ export class PtpEngine {
   private announceTimer: NodeJS.Timeout | null = null;
   private syncTimer: NodeJS.Timeout | null = null;
   private signalingTimer: NodeJS.Timeout | null = null;
+  /**
+   * sequenceId is 16 bits wide, so these wrap rather than grow: a sync every
+   * 125 ms runs out of room after a little over two hours of playing.
+   */
   private announceSeq = 0;
   private syncSeq = 0;
   private signalingSeq = 0;
@@ -149,9 +153,9 @@ export class PtpEngine {
     this.sendAnnounce();
     this.sendSync();
     this.sendSignaling();
-    this.announceTimer = setInterval(() => this.sendAnnounce(), ANNOUNCE_INTERVAL_MS);
-    this.syncTimer = setInterval(() => this.sendSync(), SYNC_INTERVAL_MS);
-    this.signalingTimer = setInterval(() => this.sendSignaling(), ANNOUNCE_INTERVAL_MS);
+    this.announceTimer = setInterval(() => this.tick(() => this.sendAnnounce()), ANNOUNCE_INTERVAL_MS);
+    this.syncTimer = setInterval(() => this.tick(() => this.sendSync()), SYNC_INTERVAL_MS);
+    this.signalingTimer = setInterval(() => this.tick(() => this.sendSignaling()), ANNOUNCE_INTERVAL_MS);
   }
 
   public stop(): void {
@@ -166,10 +170,7 @@ export class PtpEngine {
     this.eventSocket = this.generalSocket = null;
   }
 
-  private async bind(
-    port: number,
-    handler: (msg: Buffer, rinfo: { address: string; port: number }) => void,
-  ): Promise<Socket> {
+  private async bind(port: number, handler: (msg: Buffer, rinfo: { address: string; port: number }) => void): Promise<Socket> {
     const socket = createSocket({ type: 'udp4', reuseAddr: true });
     socket.on('message', handler);
     socket.on('error', (err) => this.log(`socket error on ${port}: ${err.message}`));
@@ -183,19 +184,24 @@ export class PtpEngine {
     return socket;
   }
 
+  /**
+   * A timer callback throws into nobody's hands: without this the process takes
+   * the exception. A missed timing packet costs a beat, not the server.
+   */
+  private tick(send: () => void): void {
+    try {
+      send();
+    } catch (err) {
+      this.log(`ptp send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private log(message: string): void {
     this.options.onLog?.(message);
   }
 
   /** The common 34-byte PTPv2 header, in the gPTP dialect receivers require. */
-  private header(
-    type: number,
-    length: number,
-    flags: number,
-    seq: number,
-    control: number,
-    logInterval: number,
-  ): Buffer {
+  private header(type: number, length: number, flags: number, seq: number, control: number, logInterval: number): Buffer {
     const buf = Buffer.alloc(length);
     buf[0] = 0x10 | (type & 0x0f); // majorSdoId 1 — without this we are invisible
     buf[1] = VERSION & 0x0f;
@@ -227,14 +233,8 @@ export class PtpEngine {
 
   private sendAnnounce(): void {
     const length = HDR_LEN + 30 + 12;
-    const buf = this.header(
-      MSG_ANNOUNCE,
-      length,
-      FLAG_UNICAST | FLAG_PTP_TIMESCALE,
-      this.announceSeq++,
-      0x00,
-      LOG_ANNOUNCE_INTERVAL,
-    );
+    const buf = this.header(MSG_ANNOUNCE, length, FLAG_UNICAST | FLAG_PTP_TIMESCALE, this.announceSeq, 0x00, LOG_ANNOUNCE_INTERVAL);
+    this.announceSeq = (this.announceSeq + 1) & 0xffff;
     const body = HDR_LEN;
     // originTimestamp (10) and currentUtcOffset (2) stay zero, as iOS sends them.
     buf[body + 13] = PRIORITY1;
@@ -255,27 +255,14 @@ export class PtpEngine {
 
   /** Two-step master: Sync with an empty timestamp, then Follow_Up with the real one. */
   private sendSync(): void {
-    const seq = this.syncSeq++;
-    const sync = this.header(
-      MSG_SYNC,
-      HDR_LEN + 10,
-      FLAG_UNICAST | FLAG_PTP_TIMESCALE | FLAG_TWO_STEP,
-      seq,
-      0x00,
-      LOG_SYNC_INTERVAL,
-    );
+    const seq = this.syncSeq;
+    this.syncSeq = (this.syncSeq + 1) & 0xffff;
+    const sync = this.header(MSG_SYNC, HDR_LEN + 10, FLAG_UNICAST | FLAG_PTP_TIMESCALE | FLAG_TWO_STEP, seq, 0x00, LOG_SYNC_INTERVAL);
     this.send(this.eventSocket, EVENT_PORT, sync);
     const egress = this.clock.now(); // best-effort software egress time
 
     const length = HDR_LEN + 10 + 32 + 20;
-    const followUp = this.header(
-      MSG_FOLLOW_UP,
-      length,
-      FLAG_UNICAST | FLAG_PTP_TIMESCALE,
-      seq,
-      0x00,
-      LOG_SYNC_INTERVAL,
-    );
+    const followUp = this.header(MSG_FOLLOW_UP, length, FLAG_UNICAST | FLAG_PTP_TIMESCALE, seq, 0x00, LOG_SYNC_INTERVAL);
     writeTimestamp(followUp, HDR_LEN, egress); // preciseOriginTimestamp
 
     // 802.1AS Follow_Up information TLV: ORG_EXT, len 28, OUI 00:80:C2 subtype 1.
@@ -302,14 +289,8 @@ export class PtpEngine {
   /** The once-a-second Signaling iOS sends its timing peers: two Apple TLVs. */
   private sendSignaling(): void {
     const length = HDR_LEN + 10 + 26 + 36;
-    const buf = this.header(
-      MSG_SIGNALING,
-      length,
-      FLAG_UNICAST | FLAG_PTP_TIMESCALE,
-      this.signalingSeq++,
-      0x05,
-      -128,
-    );
+    const buf = this.header(MSG_SIGNALING, length, FLAG_UNICAST | FLAG_PTP_TIMESCALE, this.signalingSeq, 0x05, -128);
+    this.signalingSeq = (this.signalingSeq + 1) & 0xffff;
     // targetPortIdentity (10 bytes) stays the zero wildcard.
     let tlv = HDR_LEN + 10;
     buf.writeUInt16BE(0x0003, tlv);
@@ -397,14 +378,7 @@ export class PtpEngine {
     req.copy(resp, HDR_LEN + 10, 20, 30);
     this.send(this.eventSocket, EVENT_PORT, resp, requester);
 
-    const followUp = this.header(
-      MSG_PDELAY_RESP_FUP,
-      HDR_LEN + 10 + 10,
-      FLAG_UNICAST | FLAG_PTP_TIMESCALE,
-      seq,
-      0x00,
-      LOG_SYNC_INTERVAL,
-    );
+    const followUp = this.header(MSG_PDELAY_RESP_FUP, HDR_LEN + 10 + 10, FLAG_UNICAST | FLAG_PTP_TIMESCALE, seq, 0x00, LOG_SYNC_INTERVAL);
     writeTimestamp(followUp, HDR_LEN, this.clock.now()); // responseOriginTimestamp
     req.copy(followUp, HDR_LEN + 10, 20, 30);
     this.send(this.generalSocket, GENERAL_PORT, followUp, requester);
