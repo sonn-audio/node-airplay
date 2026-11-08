@@ -30,6 +30,7 @@ export interface RtspRequestOptions {
 }
 
 interface Pending {
+  cseq: number;
   resolve: (value: RtspResponse) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
@@ -130,7 +131,7 @@ export class RtspConnection {
         }
         reject(new Error(`RTSP ${method} timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`));
       }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      this.queue.push({ resolve, reject, timer });
+      this.queue.push({ cseq, resolve, reject, timer });
     });
 
     socket.write(this.hap ? this.hap.encrypt(raw) : raw);
@@ -189,7 +190,7 @@ export class RtspConnection {
       const body = Buffer.from(this.buffer.subarray(bodyStart, bodyStart + contentLength));
       this.buffer = this.buffer.subarray(bodyStart + contentLength);
 
-      const pending = this.queue.shift();
+      const pending = this.takePending(headers.get('cseq'));
       if (pending) {
         clearTimeout(pending.timer);
         pending.resolve({
@@ -200,6 +201,28 @@ export class RtspConnection {
         });
       }
     }
+  }
+
+  /**
+   * The request a response answers.
+   *
+   * By its CSeq, not by its place in line. A response that arrives after its
+   * request already timed out would otherwise be handed to the next request
+   * waiting — a volume change resolved with the answer to a metadata push — and
+   * every reply after it would be one off for the rest of the session. A late
+   * answer to a request nobody waits for any more is dropped. A receiver that
+   * leaves CSeq out of its replies is answered in order, as before.
+   */
+  private takePending(cseqHeader: string | undefined): Pending | undefined {
+    const cseq = cseqHeader === undefined ? Number.NaN : Number(cseqHeader);
+    if (!Number.isInteger(cseq)) {
+      return this.queue.shift();
+    }
+    const index = this.queue.findIndex((entry) => entry.cseq === cseq);
+    if (index < 0) {
+      return undefined;
+    }
+    return this.queue.splice(index, 1)[0];
   }
 
   private failAll(err: Error): void {
