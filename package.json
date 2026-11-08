@@ -1,7 +1,7 @@
 {
   "name": "@sonn-audio/node-airplay",
-  "version": "0.1.2",
-  "description": "AirPlay for Node.js in pure TypeScript \u2014 sender and receiver, AirPlay 1 (RAOP) and AirPlay 2 (HAP, PTP, encrypted RTSP)",
+  "version": "0.1.3",
+  "description": "AirPlay for Node.js in pure TypeScript — sender and receiver, AirPlay 1 (RAOP) and AirPlay 2 (HAP, PTP, encrypted RTSP)",
   "license": "Apache-2.0",
   "author": "Rudy Berends",
   "type": "module",
