@@ -27,6 +27,25 @@ export interface RtspRequestOptions {
   /** Request line target; defaults to the `rtsp://<host>/<sessionId>` form. */
   uri?: string;
   timeoutMs?: number;
+  /**
+   * On a one-at-a-time connection: a request of the same kind still waiting to
+   * go out is dropped for this one — only the newest volume, say, is worth
+   * sending. Ignored where requests go out at once.
+   */
+  replaces?: string;
+  /**
+   * On a one-at-a-time connection: go out before waiting requests that are not
+   * urgent themselves. Ignored where requests go out at once.
+   */
+  urgent?: boolean;
+}
+
+export interface RtspConnectionOptions {
+  /**
+   * Send the next request only once the previous one is answered or has timed
+   * out. See {@link RtspConnection}.
+   */
+  oneAtATime?: boolean;
 }
 
 interface Pending {
@@ -34,6 +53,14 @@ interface Pending {
   resolve: (value: RtspResponse) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+/** A request on a one-at-a-time connection that has not gone out yet. */
+interface Waiting {
+  method: string;
+  options: RtspRequestOptions;
+  resolve: (value: RtspResponse) => void;
+  reject: (err: Error) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -46,7 +73,20 @@ export class RtspConnection {
   /** Set once pairing completes; from then on every byte is HAP-framed. */
   private hap: HapSession | null = null;
   private closed = false;
+  private readonly waiting: Waiting[] = [];
 
+  /**
+   * :param options.oneAtATime: what an AirPlay 1 receiver needs. RTSP lets a
+   *   client send its next request before the last one is answered, and Apple
+   *   receivers take that in their stride; the embedded RTSP servers in a lot of
+   *   AirPlay 1 gear do not. Handed a volume change and a metadata push in the
+   *   same instant, a B&O speaker stopped answering anything on the connection,
+   *   and stayed silent (sonn-audio/core#429). libraop, which drove these
+   *   receivers for years, never had two requests out at once, so this lane
+   *   does not either. It stays off for AirPlay 2: its `/feedback` keepalive
+   *   must not wait behind a slow artwork upload, or the receiver ends the
+   *   session.
+   */
   constructor(
     private readonly host: string,
     private readonly port: number,
@@ -54,6 +94,7 @@ export class RtspConnection {
     private readonly sessionId: string,
     /** Called when the receiver drops the control channel — the session is over. */
     private readonly onClose?: (reason: string) => void,
+    private readonly options: RtspConnectionOptions = {},
   ) {}
 
   public async connect(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
@@ -99,10 +140,49 @@ export class RtspConnection {
   }
 
   public async request(method: string, options: RtspRequestOptions = {}): Promise<RtspResponse> {
-    const socket = this.socket;
-    if (!socket || this.closed) {
+    if (!this.socket || this.closed) {
       throw new Error('RTSP connection is not open');
     }
+    if (!this.options.oneAtATime) {
+      return new Promise<RtspResponse>((resolve, reject) => this.send({ method, options, resolve, reject }));
+    }
+    return new Promise<RtspResponse>((resolve, reject) => {
+      const entry: Waiting = { method, options, resolve, reject };
+      if (options.replaces !== undefined) {
+        const index = this.waiting.findIndex((w) => w.options.replaces === options.replaces);
+        if (index >= 0) {
+          const [dropped] = this.waiting.splice(index, 1);
+          dropped?.reject(new Error(`RTSP ${dropped.method} superseded before it was sent`));
+        }
+      }
+      if (options.urgent) {
+        const firstOrdinary = this.waiting.findIndex((w) => !w.options.urgent);
+        this.waiting.splice(firstOrdinary < 0 ? this.waiting.length : firstOrdinary, 0, entry);
+      } else {
+        this.waiting.push(entry);
+      }
+      this.pump();
+    });
+  }
+
+  /** On a one-at-a-time connection: send the next waiting request if none is out. */
+  private pump(): void {
+    if (this.queue.length > 0 || this.closed || !this.socket) {
+      return;
+    }
+    const next = this.waiting.shift();
+    if (next) {
+      this.send(next);
+    }
+  }
+
+  private send(entry: Waiting): void {
+    const socket = this.socket;
+    if (!socket || this.closed) {
+      entry.reject(new Error('RTSP connection is not open'));
+      return;
+    }
+    const { method, options } = entry;
     const body = options.body ?? Buffer.alloc(0);
     const uri = options.uri ?? `rtsp://${this.host}/${this.sessionId}`;
     const cseq = ++this.cseq;
@@ -123,19 +203,18 @@ export class RtspConnection {
     const head = Buffer.from(`${method} ${uri} RTSP/1.0\r\n${headerText}\r\n\r\n`, 'utf8');
     const raw = Buffer.concat([head, body]);
 
-    const response = new Promise<RtspResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const index = this.queue.findIndex((entry) => entry.timer === timer);
-        if (index >= 0) {
-          this.queue.splice(index, 1);
-        }
-        reject(new Error(`RTSP ${method} timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`));
-      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      this.queue.push({ cseq, resolve, reject, timer });
-    });
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      const index = this.queue.findIndex((pending) => pending.timer === timer);
+      if (index >= 0) {
+        this.queue.splice(index, 1);
+      }
+      entry.reject(new Error(`RTSP ${method} timed out after ${timeoutMs}ms`));
+      this.pump();
+    }, timeoutMs);
+    this.queue.push({ cseq, resolve: entry.resolve, reject: entry.reject, timer });
 
     socket.write(this.hap ? this.hap.encrypt(raw) : raw);
-    return response;
   }
 
   public close(): void {
@@ -200,6 +279,9 @@ export class RtspConnection {
           body,
         });
       }
+      if (this.options.oneAtATime) {
+        this.pump();
+      }
     }
   }
 
@@ -230,6 +312,9 @@ export class RtspConnection {
       const pending = this.queue.shift() as Pending;
       clearTimeout(pending.timer);
       pending.reject(err);
+    }
+    while (this.waiting.length > 0) {
+      (this.waiting.shift() as Waiting).reject(err);
     }
   }
 }

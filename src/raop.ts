@@ -105,7 +105,11 @@ async function authSetup(rtsp: RtspConnection): Promise<void> {
  */
 export async function connectRaop(options: RaopConnectOptions): Promise<RaopSession> {
   const sessionId = randomBytes(4).readUInt32BE(0).toString().padStart(10, '0');
-  const rtsp = new RtspConnection(options.host, options.port ?? 5000, sessionId);
+  // One request at a time, as libraop did: a lot of AirPlay 1 firmware stops
+  // answering when a second request arrives before the first is answered.
+  const rtsp = new RtspConnection(options.host, options.port ?? 5000, sessionId, undefined, {
+    oneAtATime: true,
+  });
   await rtsp.connect(options.timeoutMs);
 
   const clientInstance = randomBytes(8).toString('hex');

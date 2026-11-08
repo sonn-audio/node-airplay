@@ -120,6 +120,13 @@ export async function setupRealtimeStream(
   return { dataPort, controlPort };
 }
 
+/**
+ * How long a metadata or artwork push may wait for its answer. Some receivers
+ * never answer one; where requests go one at a time, a volume change must not
+ * sit behind that for the full RTSP timeout.
+ */
+const METADATA_TIMEOUT_MS = 4_000;
+
 /** Map a 0-100 level onto the AirPlay dB scale; 0 is mute. */
 export function volumeToDb(volume: number): number {
   const clamped = Math.min(100, Math.max(0, volume));
@@ -135,6 +142,11 @@ export async function setVolume(
     uri: sessionUrl,
     contentType: 'text/parameters',
     body: Buffer.from(`volume: ${volumeToDb(volume).toFixed(6)}\r\n`, 'utf8'),
+    // Where requests go one at a time, the newest level is the only one worth
+    // sending, and it goes before metadata still waiting: a knob should not lag
+    // behind a cover upload.
+    replaces: 'volume',
+    urgent: true,
   });
 }
 
@@ -185,6 +197,8 @@ export async function setMetadata(
     contentType: 'application/x-dmap-tagged',
     headers: { 'RTP-Info': `rtptime=${rtpTimestamp >>> 0}` },
     body: Buffer.concat([container, payload]),
+    replaces: 'metadata',
+    timeoutMs: METADATA_TIMEOUT_MS,
   });
 }
 
@@ -201,6 +215,8 @@ export async function setArtwork(
     contentType,
     headers: { 'RTP-Info': `rtptime=${rtpTimestamp >>> 0}` },
     body: data,
+    replaces: 'artwork',
+    timeoutMs: METADATA_TIMEOUT_MS,
   });
 }
 
